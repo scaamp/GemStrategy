@@ -33,7 +33,7 @@ class GEMStrategy:
     def __init__(self, 
                  risky_assets=[
                      # Główne indeksy USA
-                     'SPY',   # S&P 500
+                    #  'SPY',   # S&P 500
                      'QQQ',   # NASDAQ 100
                     #  'IWM',   # Russell 2000 (małe spółki)
                      
@@ -42,7 +42,7 @@ class GEMStrategy:
                     #  'EEM',   # MSCI Emerging Markets
                      
                      # Alternatywne klasy aktywów
-                     'GLD',   # SPDR Gold Shares
+                    #  'GLD',   # SPDR Gold Shares
                     #  'VNQ',   # Vanguard Real Estate ETF
                     #  'BTC-USD', # Bitcoin (dostępny od 2014)
                  ],
@@ -60,7 +60,9 @@ class GEMStrategy:
                  monthly_contribution=0,
                  investment_strategy='lump_sum',  # 'lump_sum' lub 'dca'
                  transaction_cost=0.001,  # 0.1% na pokrycie kosztów transakcyjnych i slippage
-                 risk_free_asset='BIL'):  # ETF do śledzenia stopy wolnej od ryzyka
+                 risk_free_asset='SHY',
+                 top_k=1,  # Liczba najlepszych aktywów do portfela (1 = klasyczny GEM)
+                 volatility_weighted=False):  # Czy ważyć aktywa odwrotnie do zmienności  # ETF do śledzenia stopy wolnej od ryzyka
         """
         Parametry:
         ----------
@@ -104,12 +106,15 @@ class GEMStrategy:
         self.investment_strategy = investment_strategy
         self.transaction_cost = transaction_cost
         self.risk_free_asset = risk_free_asset
+        self.top_k = min(top_k, len(risky_assets))  # Nie więcej niż liczba dostępnych aktywów
+        self.volatility_weighted = volatility_weighted
         
         self.prices = None
         self.returns = None
         self.portfolio_value = None
         self.holdings = None
         self.rf_prices = None  # Ceny aktywa wolnego od ryzyka
+        self.weights = None  # Wagi aktywów w portfelu
     
         
     def download_data(self):
@@ -130,6 +135,7 @@ class GEMStrategy:
                                 end=self.end_date,
                                 progress=False)
                 
+                # Sprawdź dostępność danych
                 if data.empty:
                     raise ValueError("Nie udało się pobrać danych - pusty DataFrame")
                 
@@ -140,6 +146,7 @@ class GEMStrategy:
                         self.prices = data['Adj Close'][self.all_assets]
                         self.rf_prices = data['Adj Close'][self.risk_free_asset]
                     else:
+                        print("Rekonstruuję total return z Close + Dividends")
                         # Fallback na 'Close' jeśli 'Adj Close' nie istnieje
                         self.prices = data['Close'][self.all_assets]
                         self.rf_prices = data['Close'][self.risk_free_asset]
@@ -149,6 +156,7 @@ class GEMStrategy:
                         self.prices = data['Adj Close'].to_frame(name=self.all_assets[0])
                         self.rf_prices = data['Adj Close'].to_frame(name=self.risk_free_asset)
                     else:
+                        print("Rekonstruuję total return z Close + Dividends")
                         self.prices = data['Close'].to_frame(name=self.all_assets[0])
                         self.rf_prices = data['Close'].to_frame(name=self.risk_free_asset)
                 
@@ -176,6 +184,45 @@ class GEMStrategy:
                     print(f"Ostatni błąd: {str(e)}")
                     raise ValueError("Nie udało się pobrać danych historycznych. Sprawdź połączenie internetowe i dostępność symboli.")
         
+    def calculate_volatility(self, date, asset, window=12):
+        """
+        Oblicza roczną zmienność aktywa na podstawie miesięcznych zwrotów.
+        
+        Parametry:
+        ----------
+        date : datetime
+            Data, na którą obliczamy zmienność
+        asset : str
+            Ticker aktywa
+        window : int
+            Liczba miesięcy do obliczenia zmienności
+            
+        Zwraca:
+        -------
+        float lub np.nan
+            Roczna zmienność lub np.nan jeśli brak wystarczających danych
+        """
+        # Znajdź datę początkową dla okna zmienności
+        start_date = date - pd.DateOffset(months=window)
+        
+        # Pobierz ceny w tym okresie
+        prices = self.prices.loc[start_date:date, asset].dropna()
+        
+        # Wymagamy co najmniej 75% kompletnych danych
+        min_required_points = int(0.75 * (window * 21))  # ~21 dni handlowych w miesiącu
+        if len(prices) < min_required_points:
+            return np.nan
+        
+        # Oblicz miesięczne logarytmiczne zwroty
+        monthly_prices = prices.resample('M').last()
+        log_returns = np.log(monthly_prices / monthly_prices.shift(1)).dropna()
+        
+        # Oblicz roczną zmienność
+        if len(log_returns) > 1:
+            return log_returns.std() * np.sqrt(12)  # Annualizacja
+        else:
+            return np.nan
+    
     def calculate_momentum(self, date, asset):
         """
         Oblicza momentum dla danego aktywa na określoną datę.
@@ -258,31 +305,44 @@ class GEMStrategy:
                 # Przejdź do aktywów bezpiecznych
                 return self._select_safe_asset(date, current_asset)
         
-        # Znajdź lidera (aktywo z najwyższym momentum)
-        leader = max(valid_risky, key=valid_risky.get)
-        leader_momentum = valid_risky[leader]
-        
         # Krok 2: Absolute Momentum - porównaj z T-Bills
-        # Oblicz momentum dla T-Bills
-        lookback_months = self.lookback_period
-        gap_months = self.gap_period
+        rf_momentum = self.calculate_momentum(date, self.risk_free_asset)
         
-        end_date = date - pd.DateOffset(months=gap_months)
-        start_date = end_date - pd.DateOffset(months=lookback_months)
+        # Znajdź top-k aktywów z dodatnim excess momentum
+        selected_assets = []
+        for asset, mom in sorted(valid_risky.items(), key=lambda x: x[1], reverse=True):
+            if pd.notna(rf_momentum) and mom > rf_momentum:
+                selected_assets.append(asset)
+                if len(selected_assets) >= self.top_k:
+                    break
         
-        # Pobierz ceny T-Bills w tym okresie
-        rf_prices = self.rf_prices.loc[start_date:end_date]
-        
-        if len(rf_prices) < 2:
-            rf_momentum = np.nan
-        else:
-            rf_momentum = (rf_prices.iloc[-1] / rf_prices.iloc[0]) - 1
-        
-        # Sprawdź czy excess momentum jest dodatni
-        if pd.notna(rf_momentum) and leader_momentum > rf_momentum:
-            return leader
-        else:
+        if not selected_assets:
             return self._select_safe_asset(date, current_asset)
+        
+        # Jeśli tylko jeden aktyw lub nie używamy ważenia zmiennością
+        if len(selected_assets) == 1 or not self.volatility_weighted:
+            self.weights = {asset: 1.0 / len(selected_assets) for asset in selected_assets}
+            return selected_assets[0]  # Zwróć najlepszy aktyw
+        
+        # Oblicz wagi odwrotnie proporcjonalne do zmienności
+        volatilities = {}
+        for asset in selected_assets:
+            vol = self.calculate_volatility(date, asset)
+            if pd.notna(vol) and vol > 0:
+                volatilities[asset] = 1.0 / vol
+            else:
+                volatilities[asset] = 0.0
+        
+        # Normalizuj wagi
+        total_inv_vol = sum(volatilities.values())
+        if total_inv_vol > 0:
+            self.weights = {asset: vol/total_inv_vol for asset, vol in volatilities.items()}
+        else:
+            # Jeśli nie można obliczyć wag, użyj równych wag
+            self.weights = {asset: 1.0/len(selected_assets) for asset in selected_assets}
+        
+        # Zwróć aktyw z największą wagą
+        return max(self.weights.items(), key=lambda x: x[1])[0]
     
     def _select_safe_asset(self, date, current_asset=None):
         """
@@ -455,9 +515,28 @@ class GEMStrategy:
         
         return metrics
     
-    def calculate_buyhold_benchmark(self, benchmark_ticker='SPY'):
+    def calculate_buyhold_benchmark(self, benchmark_ticker='QQQ'):
         """Oblicza wyniki strategii Buy & Hold dla benchmarku."""
-        benchmark_prices = self.prices[benchmark_ticker]
+        # Pobierz dane benchmarku nawet jeśli nie ma go w puli aktywów
+        benchmark_data = yf.download(benchmark_ticker, 
+                                   start=self.start_date, 
+                                   end=self.end_date,
+                                   progress=False)
+        
+        if isinstance(benchmark_data.columns, pd.MultiIndex):
+            if 'Adj Close' in benchmark_data.columns.levels[0]:
+                benchmark_prices = benchmark_data['Adj Close'].squeeze()
+            else:
+                benchmark_prices = benchmark_data['Close'].squeeze()
+        else:
+            if 'Adj Close' in benchmark_data.columns:
+                benchmark_prices = benchmark_data['Adj Close'].squeeze()
+            else:
+                benchmark_prices = benchmark_data['Close'].squeeze()
+                
+        # Upewnij się, że mamy Series a nie DataFrame
+        if isinstance(benchmark_prices, pd.DataFrame):
+            benchmark_prices = benchmark_prices.iloc[:, 0]
         
         # Oblicz całkowite wpłaty
         if self.investment_strategy == 'dca':
@@ -877,7 +956,7 @@ class GEMStrategy:
 
 
 # PRZYKŁAD UŻYCIA
-def run_gem_strategy(strategy_type='dca', fee_type='auto', plot_type=1):
+def run_gem_strategy(strategy_type='dca', fee_type='auto', plot_type=1, top_k=1, volatility_weighted=False, benchmark='QQQ'):
     """
     Uruchamia strategię GEM z określonymi parametrami.
     
@@ -889,6 +968,10 @@ def run_gem_strategy(strategy_type='dca', fee_type='auto', plot_type=1):
         'auto', 0.0, 0.005, 0.01
     plot_type : int
         1 (standardowe) lub 2 (szczegółowe)
+    top_k : int
+        Liczba najlepszych aktywów do portfela (1 = klasyczny GEM)
+    volatility_weighted : bool
+        Czy ważyć aktywa odwrotnie do zmienności
     """
     print("="*60)
     print("STRATEGIA GEM - GLOBAL EQUITY MOMENTUM")
@@ -914,15 +997,17 @@ def run_gem_strategy(strategy_type='dca', fee_type='auto', plot_type=1):
     
     # Konfiguracja strategii
     gem = GEMStrategy(
-        start_date='2000-01-01',              # Data początkowa
-        end_date=None,                        # Data końcowa (automatycznie)
+        start_date='1970-01-01',              # Data początkowa (start SHY ETF)
+        end_date='2025-10-14',                        # Data końcowa (automatycznie)
         lookback_period=12,                   # 12 miesięcy momentum
         gap_period=1,                         # Wykluczamy ostatni miesiąc
         rebalance_frequency=1,                # Rebalansowanie co miesiąc
         initial_capital=initial_capital,      # Kapitał początkowy
         monthly_contribution=monthly_contribution,  # Miesięczne wpłaty
         investment_strategy=investment_strategy,    # Strategia inwestycyjna
-        transaction_cost=0.001                # Koszt transakcji 0.1%
+        transaction_cost=0.001,               # Koszt transakcji 0.1%
+        top_k=top_k,                         # Liczba najlepszych aktywów
+        volatility_weighted=volatility_weighted  # Ważenie odwrotnie do zmienności
     )
     
     # Uruchom backtest
@@ -930,9 +1015,9 @@ def run_gem_strategy(strategy_type='dca', fee_type='auto', plot_type=1):
     
     # Wyświetl wyniki
     if plot_type == 2:
-        gem.plot_detailed_results(benchmark_ticker='SPY')
+        gem.plot_detailed_results(benchmark_ticker=benchmark)
     else:
-        gem.plot_results(benchmark_ticker='SPY')
+        gem.plot_results(benchmark_ticker=benchmark)
 
 if __name__ == "__main__":
     import sys
@@ -945,6 +1030,12 @@ if __name__ == "__main__":
                       help='Opłata zarządcza (auto, 0, 0.5 lub 1.0)')
     parser.add_argument('--plot', choices=['1', '2'], default='1',
                       help='Typ wykresu (1=standardowy, 2=szczegółowy)')
+    parser.add_argument('--top-k', type=int, default=1,
+                      help='Liczba najlepszych aktywów do portfela (1 = klasyczny GEM)')
+    parser.add_argument('--volatility-weighted', action='store_true',
+                            help='Ważyć aktywa odwrotnie do zmienności')
+    parser.add_argument('--benchmark', choices=['SPY', 'QQQ'], default='QQQ',
+                            help='Benchmark do porównania (SPY lub QQQ)')
     
     # Jeśli nie ma argumentów, użyj trybu interaktywnego
     if len(sys.argv) == 1:
@@ -971,12 +1062,30 @@ if __name__ == "__main__":
             else:
                 fee_type = 0.0
             
+            print("\nWybierz liczbę najlepszych aktywów (Top-K):")
+            print("1. Klasyczny GEM (1 aktywo)")
+            print("2. Top-2 aktywa")
+            print("3. Top-3 aktywa")
+            top_k = int(input("Wprowadź wybór (1-3): ").strip())
+            
+            print("\nCzy chcesz ważyć aktywa odwrotnie do zmienności?")
+            print("1. Nie - równe wagi")
+            print("2. Tak - wagi odwrotnie proporcjonalne do zmienności")
+            vol_choice = input("Wprowadź wybór (1 lub 2): ").strip()
+            volatility_weighted = (vol_choice == "2")
+            
             print("\nWybierz typ wykresu:")
             print("1. Standardowe wykresy (4 wykresy)")
             print("2. Szczegółowy interaktywny wykres (2 duże wykresy)")
             plot_choice = int(input("Wprowadź wybór (1 lub 2): ").strip())
             
-            run_gem_strategy(strategy_type, fee_type, plot_choice)
+            print("\nWybierz benchmark do porównania:")
+            print("1. QQQ (NASDAQ 100)")
+            print("2. SPY (S&P 500)")
+            benchmark_choice = input("Wprowadź wybór (1 lub 2): ").strip()
+            benchmark = 'QQQ' if benchmark_choice == '1' else 'SPY'
+            
+            run_gem_strategy(strategy_type, fee_type, plot_choice, top_k, volatility_weighted, benchmark)
             
         except (EOFError, KeyboardInterrupt):
             print("\nWykryto tryb nieinteraktywny. Użyj argumentów wiersza poleceń:")
@@ -997,4 +1106,4 @@ if __name__ == "__main__":
             fee_type = 0.01
         plot_type = int(args.plot)
         
-        run_gem_strategy(strategy_type, fee_type, plot_type)
+        run_gem_strategy(strategy_type, fee_type, plot_type, args.top_k, args.volatility_weighted, args.benchmark)
