@@ -28,6 +28,18 @@ logger = logging.getLogger(__name__)
 load_dotenv(BASE_DIR / '.env')
 logger.info(f"Uruchamiam z katalogu: {BASE_DIR}")
 
+def get_next_first_day():
+    """Znajduje następny pierwszy dzień miesiąca"""
+    current = datetime.now()
+    if current.day == 1 and current.hour < 9:
+        return current
+    # Jeśli dziś nie jest 1. lub jest po 9:00, przejdź do następnego miesiąca
+    if current.month == 12:
+        next_date = current.replace(year=current.year + 1, month=1, day=1)
+    else:
+        next_date = current.replace(month=current.month + 1, day=1)
+    return next_date
+
 def should_run_today():
     """
     Sprawdza, czy dzisiaj powinniśmy uruchomić skrypt
@@ -84,26 +96,12 @@ def main():
     Główna funkcja schedulera
     """
     logger.info("=== GEM Strategy Scheduler ===")
-    logger.info("Bot będzie uruchamiany:")
-    logger.info("- Na początku każdego miesiąca")
-    logger.info("- O godzinie 9:00 rano")
+    logger.info("Bot będzie uruchamiany: pierwszy dzień każdego miesiąca o 9:00")
     
-    def get_next_first_day():
-        """Znajduje następny pierwszy dzień miesiąca"""
-        current = datetime.now()
-        if current.day == 1 and current.hour < 9:
-            return current
-        # Jeśli dziś nie jest 1. lub jest po 9:00, przejdź do następnego miesiąca
-        if current.month == 12:
-            next_date = current.replace(year=current.year + 1, month=1, day=1)
-        else:
-            next_date = current.replace(month=current.month + 1, day=1)
-        return next_date
-
     # Zaplanuj wykonanie na pierwszy dzień każdego miesiąca o 9:00
     next_run = get_next_first_day()
     schedule.every().day.at("09:00").do(run_gem_notification)
-    logger.info(f"Zaplanowano następne wykonanie na: {next_run.strftime('%Y-%m-%d')} 09:00")
+    logger.info(f"Status: Aktywny | Następne wykonanie: {next_run.strftime('%Y-%m-%d')} 09:00")
     
     # Uruchom od razu przy starcie jeśli:
     # - jest pierwszy dzień miesiąca
@@ -118,9 +116,11 @@ def main():
             schedule.run_pending()
             time.sleep(60)  # Sprawdzaj co minutę
             
-            # Wyświetl następne zaplanowane wykonanie
-            next_run = get_next_first_day()
-            logger.debug(f"Następne wykonanie: {next_run.strftime('%Y-%m-%d')} 09:00")
+            # Wyświetl status co godzinę
+            current_minute = datetime.now().minute
+            if current_minute == 0:
+                next_run = get_next_first_day()
+                logger.info(f"Status: Aktywny | Następne wykonanie: {next_run.strftime('%Y-%m-%d')} 09:00")
                 
         except KeyboardInterrupt:
             logger.info("Zatrzymywanie schedulera...")
