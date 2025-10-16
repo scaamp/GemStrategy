@@ -34,11 +34,9 @@ class GEMStrategy:
     safe assets:
     IE00BYXPSP02 (IBTA - iShares $ Treasury Bond 1-3yr UCITS ETF USD (Acc))
     IE00B3VWN518 (iShares VII PLC - iShares $ Treasury Bd 7-10y ETF USD Acc)
-    IE00BMFKG444 (XNAS - Xtrackers NASDAQ 100 UCITS ETF 1C)
 
     risky_assets:
     IE00BMFKG444 (XNAS - Xtrackers NASDAQ 100 UCITS ETF 1C)
-
     IE0006WW1TQ4 (EXUS - Xtrackers MSCI World ex USA UCITS ETF 1C USD).
     """
     
@@ -50,19 +48,19 @@ class GEMStrategy:
                     #  'IWM',   # Russell 2000 (małe spółki)
                      
                      # Rynki międzynarodowe
-                    #  'EFA',   # MSCI EAFE (rynki rozwinięte poza USA)
-                     'EEM',   # MSCI Emerging Markets
+                     'EFA',   # MSCI EAFE (rynki rozwinięte poza USA)
+                    #  'EEM',   # MSCI Emerging Markets
                      
                      # Alternatywne klasy aktywów
-                     'GLD',   # SPDR Gold Shares
+                    #  'GLD',   # SPDR Gold Shares
                     #  'VNQ',   # Vanguard Real Estate ETF
                     #  'BTC-USD', # Bitcoin (dostępny od 2014)
                  ],
                  safe_assets=[
                     #  'TLT',   # 20+ Year Treasury Bond
-                    #  'IEF',   # 7-10 Year Treasury Bond
-                     'SHY',   # 1-3 Year Treasury Bond
-                    #  'TBIL',   # 1-3 Year Treasury Bond
+                     'IEF',   # 7-10 Year Treasury Bond
+                    #  'SHY',   # 1-3 Year Treasury Bond
+                     'TBIL',   # 1-3 Year Treasury Bond
                  ],
                  start_date='2008-01-01',
                  end_date=None,
@@ -1055,6 +1053,7 @@ def run_gem_strategy(strategy_type='dca', fee_type='auto', plot_type=1, top_k=1,
         investment_strategy = 'dca'
         initial_capital = 10000  # Pierwsza wpłata
         monthly_contribution = 1000
+        transaction_cost = 0.001
         print(f"\nWybrano strategię DCA:")
         print(f"- Pierwsza wpłata: ${initial_capital:,}")
         print(f"- Miesięczne wpłaty: ${monthly_contribution:,}")
@@ -1105,7 +1104,7 @@ def run_gem_strategy(strategy_type='dca', fee_type='auto', plot_type=1, top_k=1,
         initial_capital=initial_capital,      # Kapitał początkowy
         monthly_contribution=monthly_contribution,  # Miesięczne wpłaty
         investment_strategy=investment_strategy,    # Strategia inwestycyjna
-        transaction_cost=0.001,               # Koszt transakcji 0.1%
+        transaction_cost=transaction_cost,               # Koszt transakcji 0.1%
         top_k=top_k,                         # Liczba najlepszych aktywów
         volatility_weighted=volatility_weighted,  # Ważenie odwrotnie do zmienności
         rebalance_threshold=rebalance_threshold,  # Margines rebalansowania (1% domyślnie)
