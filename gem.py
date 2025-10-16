@@ -29,6 +29,18 @@ class GEMStrategy:
     - Obligacje o różnej duracji (TLT, IEF, SHY) pozwalają dostosować się do 
       różnych środowisk stóp procentowych
     """
+
+    """
+    safe assets:
+    IE00BYXPSP02 (IBTA - iShares $ Treasury Bond 1-3yr UCITS ETF USD (Acc))
+    IE00B3VWN518 (iShares VII PLC - iShares $ Treasury Bd 7-10y ETF USD Acc)
+    IE00BMFKG444 (XNAS - Xtrackers NASDAQ 100 UCITS ETF 1C)
+
+    risky_assets:
+    IE00BMFKG444 (XNAS - Xtrackers NASDAQ 100 UCITS ETF 1C)
+
+    IE0006WW1TQ4 (EXUS - Xtrackers MSCI World ex USA UCITS ETF 1C USD).
+    """
     
     def __init__(self, 
                  risky_assets=[
@@ -39,10 +51,10 @@ class GEMStrategy:
                      
                      # Rynki międzynarodowe
                     #  'EFA',   # MSCI EAFE (rynki rozwinięte poza USA)
-                    #  'EEM',   # MSCI Emerging Markets
+                     'EEM',   # MSCI Emerging Markets
                      
                      # Alternatywne klasy aktywów
-                    #  'GLD',   # SPDR Gold Shares
+                     'GLD',   # SPDR Gold Shares
                     #  'VNQ',   # Vanguard Real Estate ETF
                     #  'BTC-USD', # Bitcoin (dostępny od 2014)
                  ],
@@ -50,6 +62,7 @@ class GEMStrategy:
                     #  'TLT',   # 20+ Year Treasury Bond
                     #  'IEF',   # 7-10 Year Treasury Bond
                      'SHY',   # 1-3 Year Treasury Bond
+                    #  'TBIL',   # 1-3 Year Treasury Bond
                  ],
                  start_date='2000-01-01',
                  end_date=None,
