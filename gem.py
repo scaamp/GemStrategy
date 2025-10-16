@@ -64,18 +64,19 @@ class GEMStrategy:
                      'SHY',   # 1-3 Year Treasury Bond
                     #  'TBIL',   # 1-3 Year Treasury Bond
                  ],
-                 start_date='2000-01-01',
+                 start_date='2008-01-01',
                  end_date=None,
-                 lookback_period=6,
+                 lookback_period=12,
                  gap_period=1,
-                 rebalance_frequency=3,
+                 rebalance_frequency=1,
                  initial_capital=10000,
-                 monthly_contribution=0,
+                 monthly_contribution=1000,
                  investment_strategy='lump_sum',  # 'lump_sum' lub 'dca'
                  transaction_cost=0.001,  # 0.1% na pokrycie kosztów transakcyjnych i slippage
                  risk_free_asset='SHY',
                  top_k=1,  # Liczba najlepszych aktywów do portfela (1 = klasyczny GEM)
-                 volatility_weighted=False):  # Czy ważyć aktywa odwrotnie do zmienności  # ETF do śledzenia stopy wolnej od ryzyka
+                 volatility_weighted=False,  # Czy ważyć aktywa odwrotnie do zmienności
+                 rebalance_threshold=0.01):  # Margines w % - nowe aktywo musi być lepsze o co najmniej tyle
         """
         Parametry:
         ----------
@@ -101,10 +102,15 @@ class GEMStrategy:
             'lump_sum' - jedna wpłata na początku, 'dca' - miesięczne wpłaty
         transaction_cost : float
             Koszt transakcyjny jako % wartości transakcji (np. 0.001 = 0.1%)
-        management_fee : float
-            Opłata zarządcza roczna jako % wartości portfela (np. 0.01 = 1%)
-        risk_free_rate : float
-            Stopa wolna od ryzyka do obliczania wskaźnika Sharpe'a (roczna)
+        risk_free_asset : str
+            Ticker aktywa wolnego od ryzyka (np. 'SHY', 'TLT')
+        top_k : int
+            Liczba najlepszych aktywów do portfela (1 = klasyczny GEM)
+        volatility_weighted : bool
+            Czy ważyć aktywa odwrotnie do zmienności
+        rebalance_threshold : float
+            Margines rebalansowania jako % (np. 0.01 = 1%). Nowe aktywo musi być 
+            lepsze o co najmniej tyle, aby nastąpiła zmiana. Zmniejsza liczbę transakcji.
         """
         self.risky_assets = risky_assets
         self.safe_assets = safe_assets
@@ -121,6 +127,7 @@ class GEMStrategy:
         self.risk_free_asset = risk_free_asset
         self.top_k = min(top_k, len(risky_assets))  # Nie więcej niż liczba dostępnych aktywów
         self.volatility_weighted = volatility_weighted
+        self.rebalance_threshold = rebalance_threshold
         
         self.prices = None
         self.returns = None
@@ -131,71 +138,57 @@ class GEMStrategy:
     
         
     def download_data(self):
-        """Pobiera dane cenowe dla wszystkich aktywów z Yahoo Finance."""
+        """
+        Pobiera skorygowane dane cenowe (total return, uwzględniające dywidendy) 
+        dla wszystkich aktywów z Yahoo Finance.
+        """
         print("Pobieranie danych historycznych...")
         
-        # Dodaj opóźnienie między próbami
-        import time
-        max_retries = 3
-        retry_delay = 2  # sekundy
+        # Pobierz wszystkie aktywa + risk_free_asset (może być różne od safe_assets)
+        all_tickers = list(set(self.all_assets + [self.risk_free_asset]))
         
-        for retry in range(max_retries):
-            try:
-                # Pobierz dane dla wszystkich aktywów i aktywa wolnego od ryzyka
-                all_tickers = self.all_assets + [self.risk_free_asset]
-                data = yf.download(all_tickers, 
-                                start=self.start_date, 
-                                end=self.end_date,
-                                progress=False)
-                
-                # Sprawdź dostępność danych
-                if data.empty:
-                    raise ValueError("Nie udało się pobrać danych - pusty DataFrame")
-                
-                # Obsługa różnych struktur danych zwracanych przez yfinance
-                if isinstance(data.columns, pd.MultiIndex):
-                    # Dla wielu aktywów - wybierz kolumnę 'Adj Close'
-                    if 'Adj Close' in data.columns.levels[0]:
-                        self.prices = data['Adj Close'][self.all_assets]
-                        self.rf_prices = data['Adj Close'][self.risk_free_asset]
-                    else:
-                        print("Rekonstruuję total return z Close + Dividends")
-                        # Fallback na 'Close' jeśli 'Adj Close' nie istnieje
-                        self.prices = data['Close'][self.all_assets]
-                        self.rf_prices = data['Close'][self.risk_free_asset]
-                else:
-                    # Dla pojedynczego aktywa
-                    if 'Adj Close' in data.columns:
-                        self.prices = data['Adj Close'].to_frame(name=self.all_assets[0])
-                        self.rf_prices = data['Adj Close'].to_frame(name=self.risk_free_asset)
-                    else:
-                        print("Rekonstruuję total return z Close + Dividends")
-                        self.prices = data['Close'].to_frame(name=self.all_assets[0])
-                        self.rf_prices = data['Close'].to_frame(name=self.risk_free_asset)
-                
-                # Usuń brakujące dane
-                self.prices = self.prices.dropna()
-                self.rf_prices = self.rf_prices.dropna()
-                
-                if self.prices.empty or self.rf_prices.empty:
-                    raise ValueError("Wszystkie dane zostały usunięte po czyszczeniu")
-                
-                # Oblicz zwroty dzienne
-                self.returns = self.prices.pct_change()
-                
-                print(f"Pobrano dane od {self.prices.index[0].date()} do {self.prices.index[-1].date()}")
-                print(f"Liczba dni handlowych: {len(self.prices)}")
-                return  # Sukces - zakończ funkcję
-                
-            except Exception as e:
-                if retry < max_retries - 1:
-                    print(f"Próba {retry + 1} nie powiodła się: {str(e)}")
-                    print(f"Ponowna próba za {retry_delay} sekundy...")
-                    time.sleep(retry_delay)
-                else:
-                    print(f"Nie udało się pobrać danych po {max_retries} próbach.")
-                    print(f"Ostatni błąd: {str(e)}")
-                    raise ValueError("Nie udało się pobrać danych historycznych. Sprawdź połączenie internetowe i dostępność symboli.")
+        try:
+            # 💡 KLUCZOWA POPRAWKA: auto_adjust=True
+            # To gwarantuje, że kolumna 'Close' będzie zawierać skorygowane ceny (Total Return).
+            data = yf.download(
+                all_tickers, 
+                start=self.start_date, 
+                end=self.end_date,
+                auto_adjust=True,  
+                progress=False
+            )['Close'] # Po auto_adjust=True, skorygowane ceny są w kolumnie 'Close'
+
+            if data.empty:
+                raise ValueError("Pobrany DataFrame jest pusty. Sprawdź tickery i zakres dat.")
+
+            # Sprawdzenie, czy wszystkie tickery zostały pobrane i usunięcie wierszy z NaN
+            if isinstance(data, pd.Series):
+                 # Przypadek dla jednego tickera
+                 self.prices = data.to_frame(name=self.all_assets[0]).dropna()
+                 self.rf_prices = data.to_frame(name=self.risk_free_asset).dropna()
+            else:
+                 # Pobierz aktywa ryzykowne i bezpieczne
+                 self.prices = data[self.all_assets].dropna()
+                 # Pobierz risk_free_asset (może być różne od safe_assets)
+                 if self.risk_free_asset in data.columns:
+                     self.rf_prices = data[self.risk_free_asset].dropna()
+                 else:
+                     # Jeśli risk_free_asset nie jest w danych, użyj pierwszego safe_asset
+                     self.rf_prices = data[self.safe_assets[0]].dropna()
+            
+            # Wyrównaj indeksy czasowe
+            common_index = self.prices.index.intersection(self.rf_prices.index)
+            self.prices = self.prices.loc[common_index]
+            self.rf_prices = self.rf_prices.loc[common_index]
+
+            self.returns = self.prices.pct_change()
+            
+            print(f"✅ Pobrano skorygowane dane (Total Return) od {self.prices.index[0].date()} do {self.prices.index[-1].date()}")
+            print(f"Liczba dni handlowych: {len(self.prices)}")
+
+        except Exception as e:
+            print(f"Wystąpił błąd podczas pobierania danych: {e}")
+            raise
         
     def calculate_volatility(self, date, asset, window=12):
         """
@@ -255,7 +248,11 @@ class GEMStrategy:
             Momentum aktywa lub np.nan jeśli brak wystarczających danych
         """
         # Sprawdź czy aktywo ma wystarczająco długą historię
-        asset_data = self.prices[asset]
+        # Sprawdź czy to risk_free_asset (może nie być w self.prices)
+        if asset == self.risk_free_asset:
+            asset_data = self.rf_prices
+        else:
+            asset_data = self.prices[asset]
         if asset_data.first_valid_index() is None or asset_data.first_valid_index() > date:
             return np.nan
             
@@ -273,7 +270,7 @@ class GEMStrategy:
             return np.nan
         
         # Pobierz ceny w tym okresie
-        prices_period = self.prices.loc[start_date:end_date, asset].dropna()
+        prices_period = asset_data.loc[start_date:end_date].dropna()
         
         # Wymagamy co najmniej 75% kompletnych danych w okresie
         min_required_points = int(0.75 * (self.lookback_period * 21))  # ~21 dni handlowych w miesiącu
@@ -332,10 +329,28 @@ class GEMStrategy:
         if not selected_assets:
             return self._select_safe_asset(date, current_asset)
         
+        # Krok 3: Sprawdź margines rebalansowania
+        best_asset = selected_assets[0]  # Najlepszy aktyw ryzykowny
+        
+        # Jeśli mamy obecne aktywo i to nie jest aktyw bezpieczny, sprawdź margines
+        if (current_asset is not None and 
+            current_asset in self.risky_assets and 
+            current_asset in valid_risky):
+            
+            current_momentum = valid_risky[current_asset]
+            best_momentum = valid_risky[best_asset]
+            
+            # Sprawdź czy nowe aktywo jest lepsze o co najmniej threshold
+            momentum_improvement = best_momentum - current_momentum
+            
+            if momentum_improvement < self.rebalance_threshold:
+                # Zachowaj obecne aktywo - różnica za mała
+                return current_asset
+        
         # Jeśli tylko jeden aktyw lub nie używamy ważenia zmiennością
         if len(selected_assets) == 1 or not self.volatility_weighted:
             self.weights = {asset: 1.0 / len(selected_assets) for asset in selected_assets}
-            return selected_assets[0]  # Zwróć najlepszy aktyw
+            return best_asset  # Zwróć najlepszy aktyw
         
         # Oblicz wagi odwrotnie proporcjonalne do zmienności
         volatilities = {}
@@ -359,10 +374,42 @@ class GEMStrategy:
     
     def _select_safe_asset(self, date, current_asset=None):
         """
-        Zwraca domyślne aktywo bezpieczne (IEF).
-        W klasycznym GEM nie ma rankingu aktywów bezpiecznych.
+        Wybiera najlepsze aktywo bezpieczne na podstawie momentum.
+        Uwzględnia margines rebalansowania - nie zmienia aktywa jeśli różnica za mała.
+        Jeśli brak ważnych danych, zwraca pierwsze dostępne aktywo bezpieczne.
         """
-        return self.safe_assets[0]  # IEF
+        # Oblicz momentum dla wszystkich aktywów bezpiecznych
+        safe_momentum = {}
+        for asset in self.safe_assets:
+            mom = self.calculate_momentum(date, asset)
+            safe_momentum[asset] = mom
+        
+        # Odfiltruj NaN i znajdź najlepsze aktywo bezpieczne
+        valid_safe = {k: v for k, v in safe_momentum.items() if pd.notna(v)}
+        
+        if not valid_safe:
+            # Brak ważnych danych - zwróć pierwsze dostępne aktywo bezpieczne
+            return self.safe_assets[0]
+        
+        # Znajdź najlepsze aktywo bezpieczne
+        best_safe_asset = max(valid_safe.items(), key=lambda x: x[1])[0]
+        
+        # Sprawdź margines rebalansowania dla aktywów bezpiecznych
+        if (current_asset is not None and 
+            current_asset in self.safe_assets and 
+            current_asset in valid_safe):
+            
+            current_momentum = valid_safe[current_asset]
+            best_momentum = valid_safe[best_safe_asset]
+            
+            # Sprawdź czy nowe aktywo jest lepsze o co najmniej threshold
+            momentum_improvement = best_momentum - current_momentum
+            
+            if momentum_improvement < self.rebalance_threshold:
+                # Zachowaj obecne aktywo bezpieczne - różnica za mała
+                return current_asset
+        
+        return best_safe_asset
     
     def run_backtest(self):
         """Przeprowadza backtesting strategii GEM."""
@@ -381,8 +428,9 @@ class GEMStrategy:
         monthly_prices = self.prices.resample('M').last()
         monthly_dates = monthly_prices.index
         
-        # Inicjalizacja portfela
-        current_asset = self.safe_assets[0]  # Startujemy od bezpiecznego aktywa
+        # Inicjalizacja portfela - wybierz najlepsze aktywo bezpieczne na pierwszą datę
+        first_date = monthly_dates[0]
+        current_asset = self._select_safe_asset(first_date)
         shares = {}  # Słownik przechowujący liczbę jednostek dla każdego aktywa
         for asset in self.all_assets:
             shares[asset] = 0
@@ -528,24 +576,20 @@ class GEMStrategy:
         
         return metrics
     
-    def calculate_buyhold_benchmark(self, benchmark_ticker='QQQ'):
+    def calculate_buyhold_benchmark(self, benchmark_ticker='SPY'):
         """Oblicza wyniki strategii Buy & Hold dla benchmarku."""
-        # Pobierz dane benchmarku nawet jeśli nie ma go w puli aktywów
+        # Pobierz dane benchmarku niezależnie od parametrów strategii GEM
         benchmark_data = yf.download(benchmark_ticker, 
                                    start=self.start_date, 
                                    end=self.end_date,
+                                   auto_adjust=True,  # Użyj tego samego co w GEM
                                    progress=False)
         
+        # Po auto_adjust=True, skorygowane ceny są w kolumnie 'Close'
         if isinstance(benchmark_data.columns, pd.MultiIndex):
-            if 'Adj Close' in benchmark_data.columns.levels[0]:
-                benchmark_prices = benchmark_data['Adj Close'].squeeze()
-            else:
-                benchmark_prices = benchmark_data['Close'].squeeze()
+            benchmark_prices = benchmark_data['Close'].squeeze()
         else:
-            if 'Adj Close' in benchmark_data.columns:
-                benchmark_prices = benchmark_data['Adj Close'].squeeze()
-            else:
-                benchmark_prices = benchmark_data['Close'].squeeze()
+            benchmark_prices = benchmark_data['Close'].squeeze()
                 
         # Upewnij się, że mamy Series a nie DataFrame
         if isinstance(benchmark_prices, pd.DataFrame):
@@ -558,14 +602,14 @@ class GEMStrategy:
         else:
             total_contributions = self.initial_capital
         
-        # Oblicz wartość portfela Buy & Hold
+        # Oblicz wartość portfela Buy & Hold - NIEZALEŻNIE od strategii GEM
         if self.investment_strategy == 'dca':
             # Dla DCA: symuluj miesięczne zakupy na dziennych danych
             daily_buyhold = pd.Series(index=benchmark_prices.index, dtype=float)
             shares_owned = 0
             
-            # Znajdź daty miesięczne w dziennych danych - użyj tych samych dat co strategia GEM
-            monthly_dates = self.portfolio_value.index
+            # Utwórz własne daty miesięczne dla benchmarku (niezależne od GEM)
+            monthly_dates = benchmark_prices.resample('M').last().index
             
             for i, monthly_date in enumerate(monthly_dates):
                 if i == 0:
@@ -584,15 +628,15 @@ class GEMStrategy:
                 # Aktualizuj wartość dla wszystkich dni od tej daty
                 daily_buyhold.loc[monthly_date:] = shares_owned * benchmark_prices.loc[monthly_date:]
             
-            # Dopasuj do dat strategii GEM
-            buyhold_value = daily_buyhold.reindex(self.portfolio_value.index, method='ffill')
+            # Użyj własnych dat miesięcznych dla benchmarku
+            buyhold_value = daily_buyhold.resample('M').last()
         else:
             # Dla lump sum: tradycyjny Buy & Hold
-            # Użyj ceny z pierwszej daty portfela
-            start_date = self.portfolio_value.index[0]
-            start_price = benchmark_prices.loc[:start_date].iloc[-1]
+            # Użyj pierwszej dostępnej daty benchmarku
+            start_date = benchmark_prices.index[0]
+            start_price = benchmark_prices.loc[start_date]
             initial_shares = self.initial_capital / start_price
-            buyhold_value = (benchmark_prices * initial_shares).reindex(self.portfolio_value.index, method='ffill')
+            buyhold_value = (benchmark_prices * initial_shares).resample('M').last()
         
         # Oblicz metryki - używamy miesięcznych zwrotów
         returns = buyhold_value.pct_change().dropna()
@@ -606,8 +650,19 @@ class GEMStrategy:
         drawdown = (buyhold_value - cummax) / cummax
         max_drawdown = drawdown.min() * 100
         
-        # Sharpe Ratio (roczny) - używamy miesięcznych zwrotów i rzeczywistej stopy wolnej od ryzyka
-        rf_monthly = self.rf_prices.resample('M').last()
+        # Sharpe Ratio (roczny) - pobierz dane dla stopy wolnej od ryzyka niezależnie
+        rf_data = yf.download(self.risk_free_asset, 
+                             start=self.start_date, 
+                             end=self.end_date,
+                             auto_adjust=True,
+                             progress=False)
+        
+        if isinstance(rf_data.columns, pd.MultiIndex):
+            rf_prices = rf_data['Close'].squeeze()
+        else:
+            rf_prices = rf_data['Close'].squeeze()
+            
+        rf_monthly = rf_prices.resample('M').last()
         rf_returns = rf_monthly.pct_change().reindex(returns.index)
         
         excess_returns = returns - rf_returns
@@ -969,7 +1024,7 @@ class GEMStrategy:
 
 
 # PRZYKŁAD UŻYCIA
-def run_gem_strategy(strategy_type='dca', fee_type='auto', plot_type=1, top_k=1, volatility_weighted=False, benchmark='QQQ'):
+def run_gem_strategy(strategy_type='dca', fee_type='auto', plot_type=1, top_k=1, volatility_weighted=False, benchmark='QQQ', rebalance_threshold=0.01):
     """
     Uruchamia strategię GEM z określonymi parametrami.
     
@@ -985,6 +1040,11 @@ def run_gem_strategy(strategy_type='dca', fee_type='auto', plot_type=1, top_k=1,
         Liczba najlepszych aktywów do portfela (1 = klasyczny GEM)
     volatility_weighted : bool
         Czy ważyć aktywa odwrotnie do zmienności
+    benchmark : str
+        Benchmark do porównania ('QQQ' lub 'SPY')
+    rebalance_threshold : float
+        Margines rebalansowania jako % (np. 0.01 = 1%). Nowe aktywo musi być 
+        lepsze o co najmniej tyle, aby nastąpiła zmiana. Zmniejsza liczbę transakcji.
     """
     print("="*60)
     print("STRATEGIA GEM - GLOBAL EQUITY MOMENTUM")
@@ -1007,11 +1067,38 @@ def run_gem_strategy(strategy_type='dca', fee_type='auto', plot_type=1, top_k=1,
     
     # Konfiguracja opłat zarządczych
     print("\nUwaga: Koszty zarządzania ETF-ów (expense ratio) są już uwzględnione w cenach.")
+    print(f"Margines rebalansowania: {rebalance_threshold*100:.1f}% - nowe aktywo musi być lepsze o co najmniej tyle, aby nastąpiła zmiana.")
     
     # Konfiguracja strategii
     gem = GEMStrategy(
-        start_date='1970-01-01',              # Data początkowa (start SHY ETF)
-        end_date='2025-10-14',                        # Data końcowa (automatycznie)
+         risky_assets=[
+                     # Główne indeksy USA
+                    #  'SPY',   # S&P 500
+                     'QQQ',   # NASDAQ 100
+                    # 'XNAS', # NASDAQ 100 BOSSA
+                    #  'IWM',   # Russell 2000 (małe spółki)
+                     
+                     # Rynki międzynarodowe
+                     'EFA',   # MSCI EAFE (rynki rozwinięte poza USA)
+                    #  'EEM',   # MSCI Emerging Markets
+                    #  'EXUS' # MSCI (rynki rozwinięte poza USA) BOSSA
+                     
+                     # Alternatywne klasy aktywów
+                    #  'GLD',   # SPDR Gold Shares
+                    #  'VNQ',   # Vanguard Real Estate ETF
+                    #  'BTC-USD', # Bitcoin (dostępny od 2014)
+                 ],
+                 safe_assets=[
+                    #  'TLT',   # 20+ Year Treasury Bond
+                     'IEF',   # 7-10 Year Treasury Bond
+                    #  'CBU0',   # 7-10 Year Treasury Bond BOSSA
+                     'SHY',   # 1-3 Year Treasury Bond
+                    #  'IBTA',   # 1-3 Year Treasury Bond BOSSA
+                    #  'TLT',
+                    #  'BIL'
+                 ],
+        start_date='2002-01-01',              # Data początkowa (start SHY ETF)
+        end_date='2025-10-15',                        # Data końcowa (automatycznie)
         lookback_period=12,                   # 12 miesięcy momentum
         gap_period=1,                         # Wykluczamy ostatni miesiąc
         rebalance_frequency=1,                # Rebalansowanie co miesiąc
@@ -1020,7 +1107,9 @@ def run_gem_strategy(strategy_type='dca', fee_type='auto', plot_type=1, top_k=1,
         investment_strategy=investment_strategy,    # Strategia inwestycyjna
         transaction_cost=0.001,               # Koszt transakcji 0.1%
         top_k=top_k,                         # Liczba najlepszych aktywów
-        volatility_weighted=volatility_weighted  # Ważenie odwrotnie do zmienności
+        volatility_weighted=volatility_weighted,  # Ważenie odwrotnie do zmienności
+        rebalance_threshold=rebalance_threshold,  # Margines rebalansowania (1% domyślnie)
+        risk_free_asset='SHY'
     )
     
     # Uruchom backtest
@@ -1053,18 +1142,20 @@ if __name__ == "__main__":
     # Jeśli nie ma argumentów, użyj trybu interaktywnego
     if len(sys.argv) == 1:
         try:
-            print("Wybierz strategię inwestycyjną:")
-            print("1. Lump Sum - jedna wpłata $10,000 na początku")
-            print("2. DCA - $1,000 miesięcznie przez cały okres")
-            strategy_choice = input("Wprowadź wybór (1 lub 2): ").strip()
-            strategy_type = 'dca' if strategy_choice == "2" else 'lump_sum'
+            # print("Wybierz strategię inwestycyjną:")
+            # print("1. Lump Sum - jedna wpłata $10,000 na początku")
+            # print("2. DCA - $1,000 miesięcznie przez cały okres")
+            # strategy_choice = input("Wprowadź wybór (1 lub 2): ").strip()
+            # strategy_type = 'dca' if strategy_choice == "2" else 'lump_sum'
+            strategy_type = 'dca'
             
-            print("\nCzy chcesz uwzględnić opłaty zarządcze?")
-            print("1. Bez opłat zarządczych")
-            print("2. Rzeczywiste opłaty z Yahoo Finance (automatyczne)")
-            print("3. Opłata 0.5% rocznie (szacunkowa)")
-            print("4. Opłata 1.0% rocznie (szacunkowa)")
-            fee_choice = input("Wprowadź wybór (1, 2, 3 lub 4): ").strip()
+            # print("\nCzy chcesz uwzględnić opłaty zarządcze?")
+            # print("1. Bez opłat zarządczych")
+            # print("2. Rzeczywiste opłaty z Yahoo Finance (automatyczne)")
+            # print("3. Opłata 0.5% rocznie (szacunkowa)")
+            # print("4. Opłata 1.0% rocznie (szacunkowa)")
+            # fee_choice = input("Wprowadź wybór (1, 2, 3 lub 4): ").strip()
+            fee_choice = 2
             
             if fee_choice == "2":
                 fee_type = 'auto'
@@ -1075,29 +1166,34 @@ if __name__ == "__main__":
             else:
                 fee_type = 0.0
             
-            print("\nWybierz liczbę najlepszych aktywów (Top-K):")
-            print("1. Klasyczny GEM (1 aktywo)")
-            print("2. Top-2 aktywa")
-            print("3. Top-3 aktywa")
-            top_k = int(input("Wprowadź wybór (1-3): ").strip())
+            # print("\nWybierz liczbę najlepszych aktywów (Top-K):")
+            # print("1. Klasyczny GEM (1 aktywo)")
+            # print("2. Top-2 aktywa")
+            # print("3. Top-3 aktywa")
+            # top_k = int(input("Wprowadź wybór (1-3): ").strip())
+            top_k = 1
             
-            print("\nCzy chcesz ważyć aktywa odwrotnie do zmienności?")
-            print("1. Nie - równe wagi")
-            print("2. Tak - wagi odwrotnie proporcjonalne do zmienności")
-            vol_choice = input("Wprowadź wybór (1 lub 2): ").strip()
+            # print("\nCzy chcesz ważyć aktywa odwrotnie do zmienności?")
+            # print("1. Nie - równe wagi")
+            # print("2. Tak - wagi odwrotnie proporcjonalne do zmienności")
+            # vol_choice = input("Wprowadź wybór (1 lub 2): ").strip()
+
+            vol_choice = 1
             volatility_weighted = (vol_choice == "2")
+           
+            # print("\nWybierz typ wykresu:")
+            # print("1. Standardowe wykresy (4 wykresy)")
+            # print("2. Szczegółowy interaktywny wykres (2 duże wykresy)")
+            # plot_choice = int(input("Wprowadź wybór (1 lub 2): ").strip())
+            plot_choice = 1
             
-            print("\nWybierz typ wykresu:")
-            print("1. Standardowe wykresy (4 wykresy)")
-            print("2. Szczegółowy interaktywny wykres (2 duże wykresy)")
-            plot_choice = int(input("Wprowadź wybór (1 lub 2): ").strip())
-            
-            print("\nWybierz benchmark do porównania:")
-            print("1. QQQ (NASDAQ 100)")
-            print("2. SPY (S&P 500)")
-            benchmark_choice = input("Wprowadź wybór (1 lub 2): ").strip()
-            benchmark = 'QQQ' if benchmark_choice == '1' else 'SPY'
-            
+            # print("\nWybierz benchmark do porównania:")
+            # print("1. QQQ (NASDAQ 100)")
+            # print("2. SPY (S&P 500)")
+            # benchmark_choice = input("Wprowadź wybór (1 lub 2): ").strip()
+            # benchmark = 'QQQ' if benchmark_choice == '1' else 'SPY'
+            benchmark = 'SPY'
+
             run_gem_strategy(strategy_type, fee_type, plot_choice, top_k, volatility_weighted, benchmark)
             
         except (EOFError, KeyboardInterrupt):
